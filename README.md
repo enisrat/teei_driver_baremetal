@@ -6,6 +6,12 @@ make ARCH=arm64 CROSS_COMPILE=/opt/gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux
 Device Drivers -> Security -> ... TEEI
 ```
 
+# HW
+
+/* Microtrust SW IRQ number 91(123) ~ 95(127) & 331(363) */
+
+
+
 # tee/soter
 
 - C API to "SOTER"
