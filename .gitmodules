@@ -1,0 +1,3 @@
+[submodule "android_kernel_with_teei400"]
+	path = android_kernel_with_teei400
+	url = git@github.com:enisrat/android_kernel_xiaomi_mt6785.git
