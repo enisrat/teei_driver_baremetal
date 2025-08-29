@@ -1,4 +1,4 @@
-CROSS_COMPILE=/opt/gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-
+CROSS_COMPILE ?= /opt/gcc-linaro-7.5.0-2019.12-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-
 
 KERNEL_SRCDIR_WITH_TEEI ?= ./android_kernel_with_teei400
 srctree := $(KERNEL_SRCDIR_WITH_TEEI)
@@ -26,10 +26,11 @@ LINUXINCLUDE    := \
 		$(USERINCLUDE)
 
 TEEI_OBJS := tz_driver/backward_driver.o tz_driver/irq_register.o tz_driver/notify_queue.o tz_driver/teei_cancel_cmd.o tz_driver/teei_smc_call.o tz_driver/fdrv.o tz_driver/switch_queue.o tz_driver/teei_client_main.o tz_driver/teei_task_link.o 
-TEEI_OBJS += tee/soter/call.o tee/soter/core.o
+TEEI_OBJS += tee/soter/call.o tee/soter/core.o tee/tee_shm.o
 
 
 CFLAGS := \
+		-g \
 		-O0 \
 		-std=gnu99 \
 		-Wall \
@@ -40,16 +41,24 @@ CFLAGS := \
 		-fno-common \
 		-fno-strict-aliasing \
 		-fPIC \
-		-fno-builtin
+		-fno-builtin \
+		-D__KERNEL__
 
 TZ_LOG_PAGES := 0x40300000
 
 EXTRA_CFLAGS=-DTZ_LOG_PAGES=$(TZ_LOG_PAGES)
 
-all: drv_objs baremetal.o stubs.o
+all: drv_objs baremetal.o stubs.o vfs.o km.o
 
 clean:
 	rm -f *.o stubs.c drv.a
+
+
+km.o: km.c 
+	$(CROSS_COMPILE)gcc $(CFLAGS) -I$(srctree)/drivers/misc/mediatek/teei/400/common/include -I$(srctree)/drivers/misc/mediatek/teei/400/tee/soter $(LINUXINCLUDE) -c -o $@ $^
+
+vfs.o: vfs.c thh/ta/c09c9c5daa504b78b0e46eda61556c3a.h thh/ta/8b22aba81ef0ccbfd9f5f4b634127e15.h thh/ta/rpmb.h
+	$(CROSS_COMPILE)gcc $(CFLAGS) $(LINUXINCLUDE) -c -o $@ vfs.c
 
 baremetal.o: baremetal.c
 	$(CROSS_COMPILE)gcc $(CFLAGS) $(LINUXINCLUDE) -c -o $@ $^
@@ -66,4 +75,10 @@ stubs.c: drv_objs gen_stubs.py
 	cp $(srctree)/drivers/misc/mediatek/teei/400/drv.a .
 
 drv_objs: 
-	cd $(srctree); make -j 8 EXTRA_CFLAGS=$(EXTRA_CFLAGS) ARCH=arm64 CROSS_COMPILE=$(CROSS_COMPILE) drivers/misc/mediatek/teei/400/
+	cd $(srctree); make DEBUG_FLAGS=-g -j 8 EXTRA_CFLAGS=$(EXTRA_CFLAGS) ARCH=arm64 CROSS_COMPILE=$(CROSS_COMPILE) drivers/misc/mediatek/teei/400/
+
+thh/ta/%.h: thh/ta/%.ta
+	xxd -i $^ > $@
+
+thh/ta/rpmb.h: thh/ta/rpmb
+	xxd -i $^ > $@

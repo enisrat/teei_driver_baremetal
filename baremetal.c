@@ -7,6 +7,13 @@
 static char *next_page = (char*)ALLOC_BASE_PAGE;
 static char *next_kmalloc = (char*)ALLOC_BASE_KMALLOC;
 
+static long thetime = 0;
+long ktime_get_with_offset(int a)
+{
+	thetime += 1;
+	return thetime;
+}
+
 phys_addr_t page_to_phys(void *a) {
 	return a;
 }
