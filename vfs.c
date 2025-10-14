@@ -2,6 +2,10 @@
 
 #include "thh/ta/c09c9c5daa504b78b0e46eda61556c3a.h"
 #include "thh/ta/8b22aba81ef0ccbfd9f5f4b634127e15.h"
+#include "thh/ta/d91f322ad5a441d5955110eda3272fc0.h"
+#include "thh/ta/0102030405060708090a0b0c0d0e0f10.h"
+#include "thh/ta/c1882f2d885e4e13a8c8e2622461b2fa.h"
+#include "thh/ta/93feffccd8ca11e796c7c7a21acb4932.h"
 #include "thh/ta/rpmb.h"
 
 extern char *daulOS_VFS_share_mem;
@@ -89,6 +93,27 @@ int notify_vfs_handle(void) {
                 remaining = thh_ta_8b22aba81ef0ccbfd9f5f4b634127e15_ta_len;
                 shm->cmdresp = 1;
             }
+            if(!strcmp(buf, "/vendor/thh/ta/d91f322ad5a441d5955110eda3272fc0.ta")){
+                next_chunk = thh_ta_d91f322ad5a441d5955110eda3272fc0_ta;
+                remaining = thh_ta_d91f322ad5a441d5955110eda3272fc0_ta_len;
+                shm->cmdresp = 1;
+            }
+            if(!strcmp(buf, "/vendor/thh/ta/0102030405060708090a0b0c0d0e0f10.ta")){
+                next_chunk = thh_ta_0102030405060708090a0b0c0d0e0f10_ta;
+                remaining = thh_ta_0102030405060708090a0b0c0d0e0f10_ta_len;
+                shm->cmdresp = 1;
+            }
+            if(!strcmp(buf, "/vendor/thh/ta/c1882f2d885e4e13a8c8e2622461b2fa.ta")){
+                next_chunk = thh_ta_c1882f2d885e4e13a8c8e2622461b2fa_ta;
+                remaining = thh_ta_c1882f2d885e4e13a8c8e2622461b2fa_ta_len;
+                shm->cmdresp = 1;
+            }
+            if(!strcmp(buf, "/vendor/thh/ta/93feffccd8ca11e796c7c7a21acb4932.ta")){
+                next_chunk = thh_ta_93feffccd8ca11e796c7c7a21acb4932_ta;
+                remaining = thh_ta_93feffccd8ca11e796c7c7a21acb4932_ta_len;
+                shm->cmdresp = 1;
+            }
+
             if(!strcmp(buf, "/data/vendor/thh/system/rpmb.txt")){
                 next_chunk = thh_ta_rpmb;
                 remaining = thh_ta_rpmb_len;
