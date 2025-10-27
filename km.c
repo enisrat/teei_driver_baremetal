@@ -527,34 +527,63 @@ void kmtest_optee() {
     memcpy(&real_handle, shm_output_begin->kaddr + 4, 8);
     printf("REAL HANDLE: 0x%016llx\n", real_handle);
 
-    // Update (0x08) 
-    struct tee_shm *shm_input_update = isee_shm_alloc(ctx, 0x1000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);  
+    // Update (0x08)
+    struct tee_shm *shm_input_update = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
+    if (shm_input_update == NULL) {
+        printf("shm_input_update allocation failed!\n");
+        goto cleanup_generate;
+    }
     struct tee_shm *shm_output_update = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
+    if (shm_output_update == NULL) {
+        printf("shm_output_update allocation failed!\n");
+        goto cleanup_update;
+    }
     struct tee_shm *shm_msg_update = isee_shm_alloc(ctx, 0x1000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
+    if (shm_msg_update == NULL) {
+        printf("shm_msg_update allocation failed!\n");
+        goto cleanup_update;
+    }
 
     uint64_t pa_input_update = 0, pa_output_update = 0;
     isee_shm_get_pa(shm_input_update, 0, &pa_input_update);
     isee_shm_get_pa(shm_output_update, 0, &pa_output_update);
+    printf("Update shm refs: input=%p, pa_input=%llx, output=%p, pa_output=%llx\n",
+           shm_input_update, pa_input_update, shm_output_update, pa_output_update);
 
-    // Size from begin output: 0x019d = 413 bytes
-    const size_t CORRECT_SIZE = 413;  // 0x019d
+    if (pa_input_update == 0 || pa_output_update == 0) {
+        printf("pa_input_update or pa_output_update is 0, allocation or mapping failed!\n");
+        goto cleanup_update;
+    }
+
+    // Size: 8 (handle) + 21 (input: 4 + 17) + 12 (empty auth set) = 41 bytes
+    const size_t CORRECT_SIZE = 41;
     memset(shm_input_update->kaddr, 0, CORRECT_SIZE);
 
-    uint8_t update_header[] = {
-        // Bytes 0-7: operation handle from begin !! THIS IS WRONG; HAS TO BE DYNAMIC --> 0xffffffe4 find op failed; android_keymaster.cc
-        0xae, 0xbc, 0xf4, 0x67, 0xb9, 0x3f, 0xfb, 0xee, 
+    // Build buffer: handle + input + auth set
+    uint8_t update_header[41] = {0};
+    memcpy(update_header, &real_handle, 8);  // Dynamic handle from begin
 
-        // Bytes 8-11: purpose = SIGN (0x0C)
-        0x0c, 0x00, 0x00, 0x00,
-
-        // Bytes 12-15: input length = 17 bytes ("Hello...")
-        0x11, 0x00, 0x00, 0x00,
-
-        // Bytes 16-32: "Hello, Keymaster!\0"
+    // Input buffer
+    uint32_t input_len = 17;
+    memcpy(update_header + 8, &input_len, 4);
+    // Hello, Keymaster!
+    const uint8_t input_data[] = {
         0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x2c, 0x20, 0x4b,
-        0x65, 0x79, 0x6d, 0x61, 0x73, 0x74, 0xe2, 0x72, 0x21
+        0x65, 0x79, 0x6d, 0x61, 0x73, 0x74, 0x65, 0x72, 0x21
     };
-    memcpy(shm_input_update->kaddr, update_header, 33);  // 33 bytes 
+    memcpy(update_header + 12, input_data, 17);
+
+    // Empty AuthorizationSet: indirect_size=0 (4), count=0 (4), elements_size=0 (4)
+    uint32_t auth_indirect_size = 0;
+    memcpy(update_header + 29, &auth_indirect_size, 4);
+    uint32_t auth_count = 0;
+    memcpy(update_header + 33, &auth_count, 4);
+    uint32_t auth_elements_size = 0;
+    memcpy(update_header + 37, &auth_elements_size, 4);
+
+    memcpy(shm_input_update->kaddr, update_header, CORRECT_SIZE);
+    printf("Update input buffer:\n");
+    hexdump(shm_input_update->kaddr, CORRECT_SIZE);
 
     struct optee_msg_arg *msg_update = shm_msg_update->kaddr;
     msg_update->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
@@ -562,20 +591,113 @@ void kmtest_optee() {
     msg_update->session = arg.session;
     msg_update->num_params = 4;
 
-    msg_update->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT; msg_update->params[0].u.value.a = 1;
-    msg_update->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT; 
+    msg_update->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
+    msg_update->params[0].u.value.a = 1;
+    msg_update->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
     msg_update->params[1].u.tmem.buf_ptr = pa_input_update;
-    msg_update->params[1].u.tmem.size = CORRECT_SIZE;  // 413 bytes
-    msg_update->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT; 
+    msg_update->params[1].u.tmem.size = CORRECT_SIZE;  // 41 bytes
+    msg_update->params[1].u.tmem.shm_ref = (uint64_t)shm_input_update;
+    msg_update->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
+    msg_update->params[2].u.tmem.buf_ptr = pa_output_update;
     msg_update->params[2].u.tmem.size = 0x5000;
+    msg_update->params[2].u.tmem.shm_ref = (uint64_t)shm_output_update;
     msg_update->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
 
     printf("Update: Sending EXACTLY %zu bytes\n", CORRECT_SIZE);
     soter_do_call_with_arg(ctx, msg_update);
 
+    // Fix response handling: Check both ret and params[2].size for output
     printf("Update response: %08x\n", msg_update->ret);
-    hexdump(shm_output_update->kaddr, 64);
+    if (msg_update->ret == 0) {
+        size_t out_size = msg_update->params[2].u.tmem.size;
+        printf("Update output size: %zu bytes\n", out_size);
+        hexdump(shm_output_update->kaddr, out_size > 64 ? 64 : out_size);
+    } else {
+        printf("Update failed with error: 0x%08x\n", msg_update->ret);
+    }
 
+    // Finish (0x0C)
+    struct tee_shm *shm_input_finish = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
+    if (shm_input_finish == NULL) {
+        printf("shm_input_finish allocation failed!\n");
+        goto cleanup_finish;
+    }
+    struct tee_shm *shm_output_finish = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
+    if (shm_output_finish == NULL) {
+        printf("shm_output_finish allocation failed!\n");
+        goto cleanup_finish;
+    }
+    struct tee_shm *shm_msg_finish = isee_shm_alloc(ctx, 0x1000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
+    if (shm_msg_finish == NULL) {
+        printf("shm_msg_finish allocation failed!\n");
+        goto cleanup_finish;
+    }
+
+    uint64_t pa_input_finish = 0, pa_output_finish = 0;
+    isee_shm_get_pa(shm_input_finish, 0, &pa_input_finish);
+    isee_shm_get_pa(shm_output_finish, 0, &pa_output_finish);
+
+
+    // Size: 8 (handle) + 12 (empty input: 4 + 8) + 12 (empty auth set) = 32 bytes
+    const size_t FINISH_SIZE = 32;
+    memset(shm_input_finish->kaddr, 0, FINISH_SIZE);
+
+    // Build buffer: handle + empty input + empty auth set
+    uint8_t finish_header[32] = {0};
+    memcpy(finish_header, &real_handle, 8);  // Dynamic handle from begin
+
+    // Empty input buffer (no additional data)
+    uint32_t finish_input_len = 0;  // Umbenannt
+    memcpy(finish_header + 8, &finish_input_len, 4);
+    uint64_t zero = 0;
+    memcpy(finish_header + 12, &zero, 8);  // 8-byte padding for empty input
+
+    // Empty AuthorizationSet
+    uint32_t finish_auth_indirect_size = 0;  // Umbenannt
+    memcpy(finish_header + 20, &finish_auth_indirect_size, 4);
+    uint32_t finish_auth_count = 0;  // Umbenannt
+    memcpy(finish_header + 24, &finish_auth_count, 4);
+    uint32_t finish_auth_elements_size = 0;  // Umbenannt
+    memcpy(finish_header + 28, &finish_auth_elements_size, 4);
+
+    memcpy(shm_input_finish->kaddr, finish_header, FINISH_SIZE);
+    printf("Finish input buffer:\n");
+    hexdump(shm_input_finish->kaddr, FINISH_SIZE);
+
+    struct optee_msg_arg *msg_finish = shm_msg_finish->kaddr;
+    msg_finish->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
+    msg_finish->func = 0x0C;
+    msg_finish->session = arg.session;
+    msg_finish->num_params = 4;
+
+    msg_finish->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
+    msg_finish->params[0].u.value.a = 1;
+    msg_finish->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
+    msg_finish->params[1].u.tmem.buf_ptr = pa_input_finish;
+    msg_finish->params[1].u.tmem.size = FINISH_SIZE;  // 32 bytes
+    msg_finish->params[1].u.tmem.shm_ref = (uint64_t)shm_input_finish;
+    msg_finish->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
+    msg_finish->params[2].u.tmem.buf_ptr = pa_output_finish;
+    msg_finish->params[2].u.tmem.size = 0x5000;
+    msg_finish->params[2].u.tmem.shm_ref = (uint64_t)shm_output_finish;
+    msg_finish->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
+
+    printf("Finish: Sending EXACTLY %zu bytes\n", FINISH_SIZE);
+    soter_do_call_with_arg(ctx, msg_finish);
+
+    printf("Finish response: %08x\n", msg_finish->ret);
+    if (msg_finish->ret == 0) {
+        size_t out_size = msg_finish->params[2].u.tmem.size;
+        printf("Finish output size: %zu bytes\n", out_size);
+        hexdump(shm_output_finish->kaddr, out_size > 64 ? 64 : out_size);
+    } else {
+        printf("Finish failed with error: 0x%08x\n", msg_finish->ret);
+    }
+
+    cleanup_finish:
+        isee_shm_free(shm_input_finish);
+        isee_shm_free(shm_output_finish);
+        isee_shm_free(shm_msg_finish);
     cleanup_update:
         isee_shm_free(shm_input_update);
         isee_shm_free(shm_output_update);
