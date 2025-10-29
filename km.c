@@ -6,8 +6,25 @@
 #include "tee_private.h"
 
 #define KM_COMMAND_MAGIC 'X'
+#define FIXED_SHM_SIZE 0x11800  // fixed size for input/output SHM 
+#define MSG_SHM_SIZE 0x1000     // for msg_arg
 
-//c09c9c5daa504b78b0e46eda61556c3a
+// Globals
+static void *ctx;
+static struct tee_ioctl_open_session_arg arg = {0};
+static struct tee_param params[4] = {{0}};
+static void *KM_CAMP1_INPUT;  
+static u32 *KM_CMD;           
+
+// SHM buffers
+static struct tee_shm *shm_input;
+static struct tee_shm *shm_output;
+static struct tee_shm *shm_msg;
+
+// Handle from begin_op (for reuse in update/finish)
+static uint64_t op_handle;
+
+// c09c9c5daa504b78b0e46eda61556c3a
 static struct TEEC_UUID uuid_ta = { 0xc09c9c5d, 0xaa50, 0x4b78,
 	{ 0xb0, 0xe4, 0x6e, 0xda, 0x61, 0x55, 0x6c, 0x3a } };
 
@@ -26,11 +43,8 @@ static void uuid_to_octets(uint8_t d[TEE_IOCTL_UUID_LEN],
 }
 
 static void hexdump(const void *memory, int length) {
-    // Turn memory into byte pointer
     unsigned char *bytes = (unsigned char*)memory;
-    // Make 16-byte lines like a notebook
     for (int line_start = 0; line_start < length; line_start += 16) {
-        // Print address (<-- line number: "00000000: 00000010: 00000020:")
         printf("%08x: ", line_start);
         for (int col = 0; col < 16; col++) {
             int byte_pos = line_start + col;
@@ -44,126 +58,111 @@ static void hexdump(const void *memory, int length) {
     }
 }
 
-void kmtest() {
-
-	void *ctx = soter_fake_ctx("bta_loader");
-	
-	struct tee_ioctl_open_session_arg arg = {0};
-	struct tee_param params[4] = {{0}};
-
-	uuid_to_octets(arg.uuid, &uuid_ta);
-	arg.clnt_login = TEEC_LOGIN_PUBLIC;
-	arg.num_params = 4;
-
-	soter_open_session(ctx, &arg, params);
-
-	struct tee_shm *shm = isee_shm_alloc(ctx, 0x11800, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-
-	memcpy(shm->kaddr, "ZZZZZZZZ", 8);
-
-	struct tee_ioctl_invoke_arg argi = {0};
-	argi.func = 0x0;
-	argi.session = arg.session;
-	argi.num_params = 4;
-	params[2].attr = TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT;
-	params[2].u.memref.shm = shm;
-	params[2].u.memref.size = 0x11800;
-	params[2].u.memref.shm_offs = 0;
-	params[2].attr = TEE_IOCTL_PARAM_ATTR_TYPE_NONE;
-	params[0].attr = TEE_IOCTL_PARAM_ATTR_TYPE_NONE;
-	params[1].attr = TEE_IOCTL_PARAM_ATTR_TYPE_NONE;
-	params[3].attr = TEE_IOCTL_PARAM_ATTR_TYPE_NONE;
-
-	soter_invoke_func(ctx, &argi, params);
+// init SHM (allocate once, reuse)
+void km_init_shm() {
+    shm_input = isee_shm_alloc(ctx, FIXED_SHM_SIZE, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
+    shm_output = isee_shm_alloc(ctx, FIXED_SHM_SIZE, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
+    shm_msg = isee_shm_alloc(ctx, MSG_SHM_SIZE, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
 }
 
-void kmtest_optee() {
-    void *ctx = soter_fake_ctx("bta_loader");
-    struct tee_ioctl_open_session_arg arg = {0};
-    struct tee_param params[4] = {{0}};
-    
+// cleanup 
+void km_cleanup() {
+    if (shm_input) isee_shm_free(shm_input);
+    if (shm_output) isee_shm_free(shm_output);
+    if (shm_msg) isee_shm_free(shm_msg);
+}
+
+// init context and open session
+void km_init_ctx() {
+    ctx = soter_fake_ctx("bta_loader");
+
     uuid_to_octets(arg.uuid, &uuid_ta);
     arg.clnt_login = TEEC_LOGIN_PUBLIC;
     arg.num_params = 4;
 
     soter_open_session(ctx, &arg, params);
+}
 
-    // Configure command (0x48)
-    struct tee_shm *shm_input_config = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    
-    //uint8_t payload_config[] = {0x03,0x00,0x00,0x00, 0x00,0x00,0x00,0x00}; // PASSED
-
-    uint8_t payload_config[] = 
-    {0xc0, 0xd4, 0x01, 0x00,  // OS Version: 120000 (Android 12)
-    0xa2, 0x16, 0x03, 0x00  // Patch Level: 202402 (February 2024)
-    }; // PASSED
-
-    memcpy(shm_input_config->kaddr, payload_config, sizeof(payload_config));
-
-    struct tee_shm *shm_output_config = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    struct tee_shm *shm_msg_config = isee_shm_alloc(ctx, 0x1000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    struct optee_msg_arg *msg_config = shm_msg_config->kaddr;
-
-    msg_config->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg_config->func = 0x48;
-    msg_config->session = arg.session;
-    msg_config->cancel_id = arg.cancel_id;
-    msg_config->num_params = 4;
-
-    msg_config->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
-    msg_config->params[0].u.value.a = 1;
-    msg_config->params[0].u.value.b = 0;
-    msg_config->params[0].u.value.c = 0;
-
-    msg_config->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
-    uint64_t pa_input_config = 0;
-    isee_shm_get_pa(shm_input_config, 0, &pa_input_config);
-    msg_config->params[1].u.tmem.buf_ptr = pa_input_config;
-    msg_config->params[1].u.tmem.size = sizeof(payload_config);
-    msg_config->params[1].u.tmem.shm_ref = (uint64_t)shm_input_config;
-
-    msg_config->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
-    uint64_t pa_output_config = 0;
-    isee_shm_get_pa(shm_output_config, 0, &pa_output_config);
-    msg_config->params[2].u.tmem.buf_ptr = pa_output_config;
-    msg_config->params[2].u.tmem.size = 0x5000;
-    msg_config->params[2].u.tmem.shm_ref = (uint64_t)shm_output_config;
-
-    msg_config->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
-    memset(&msg_config->params[3].u, 0, sizeof(msg_config->params[3].u));
-
-    soter_do_call_with_arg(ctx, msg_config);
-
-    // Original command (0xC0)
-    struct tee_shm *shm_input = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-
-    uint8_t payload[] = {
-    0x00, 0x00, 0x00, 0x00, // Command ID: generateKey (0x00)
-    0x07, 0x00, 0x00, 0x00, // Tag count
-    0x39, 0x00, 0x00, 0x00, // Algorithm (RSA=0x39)
-    0x03, 0x00, 0x00, 0x30, // Key size (3072 bits = 0x3000)
-    0x00, 0x01, 0x00, 0x00, // Purpose (encrypt=0x1)
-    0x02, 0x00, 0x00, 0x10, // Digest (SHA256=0x2)
-    0x03, 0x00, 0x00, 0x00, // Padding (none=0x0)
-    0x0a, 0x00, 0x00, 0x10, // Block mode (ECB=0xa)
-    0x01, 0x00, 0x00, 0x00, // Caller nonce
-    0x01, 0x00, 0x00, 0x20, // Min MAC length
-    0x02, 0x00, 0x00, 0x00, // EC curve (unused for RSA)
-    0x05, 0x00, 0x00, 0x20, // RSA public exponent (65537=0x20005)
-    0x04, 0x00, 0x00, 0x00, // Include attestation
-    0xf7, 0x01, 0x00, 0x70, // Attestation challenge (32-byte nonce)
-    0x01, 0xbd, 0x02, 0x00, // Unique ID
-    0x60, 0x50, 0xc5, 0x81, // Nonce data (example)
-    0x15, 0x8e, 0x01, 0x00, // More nonce data
-    0x00, 0x00, 0x00, 0x00  // Padding/alignment
+// Configure command (0x48)
+int km_configure() {
+    uint8_t payload_config[] = {
+        0xc0, 0xd4, 0x01, 0x00,  // OS Version: 120000 (Android 12)
+        0xa2, 0x16, 0x03, 0x00   // Patch Level: 202402 (February 2024)
     };
-    
-    memcpy(shm_input->kaddr, payload, sizeof(payload));
+    size_t payload_size = sizeof(payload_config);
 
-    struct tee_shm *shm_output = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    struct tee_shm *shm_msg = isee_shm_alloc(ctx, 0x1000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
+    // reuse shm; clear and copy data
+    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
+    memcpy(shm_input->kaddr, payload_config, payload_size);
+    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
+
     struct optee_msg_arg *msg = shm_msg->kaddr;
+    memset(msg, 0, MSG_SHM_SIZE);
+    msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
+    msg->func = 0x48;
+    msg->session = arg.session;
+    msg->cancel_id = arg.cancel_id;
+    msg->num_params = 4;
 
+    msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
+    msg->params[0].u.value.a = 1;
+
+    msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
+    uint64_t pa_input = 0;
+    isee_shm_get_pa(shm_input, 0, &pa_input);
+    msg->params[1].u.tmem.buf_ptr = pa_input;
+    msg->params[1].u.tmem.size = payload_size;
+    msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
+
+    msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
+    uint64_t pa_output = 0;
+    isee_shm_get_pa(shm_output, 0, &pa_output);
+    msg->params[2].u.tmem.buf_ptr = pa_output;
+    msg->params[2].u.tmem.size = FIXED_SHM_SIZE;
+    msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
+
+    msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
+
+    soter_do_call_with_arg(ctx, msg);
+
+    if (msg->ret != 0) {
+        printf("Configure failed: 0x%08x\n", msg->ret);
+        return -1;
+    }
+    return 0;
+}
+
+// Generate key (0x00)
+int km_generate_key() {
+    uint8_t payload[] = {
+        0x00, 0x00, 0x00, 0x00, // Command ID: generateKey (0x00)
+        0x07, 0x00, 0x00, 0x00, // Tag count
+        0x39, 0x00, 0x00, 0x00, // Algorithm (RSA=0x39)
+        0x03, 0x00, 0x00, 0x30, // Key size (3072 bits = 0x3000)
+        0x00, 0x01, 0x00, 0x00, // Purpose (encrypt=0x1)
+        0x02, 0x00, 0x00, 0x10, // Digest (SHA256=0x2)
+        0x03, 0x00, 0x00, 0x00, // Padding (none=0x0)
+        0x0a, 0x00, 0x00, 0x10, // Block mode (ECB=0xa)
+        0x01, 0x00, 0x00, 0x00, // Caller nonce
+        0x01, 0x00, 0x00, 0x20, // Min MAC length
+        0x02, 0x00, 0x00, 0x00, // EC curve (unused for RSA)
+        0x05, 0x00, 0x00, 0x20, // RSA public exponent (65537=0x20005)
+        0x04, 0x00, 0x00, 0x00, // Include attestation
+        0xf7, 0x01, 0x00, 0x70, // Attestation challenge (32-byte nonce)
+        0x01, 0xbd, 0x02, 0x00, // Unique ID
+        0x60, 0x50, 0xc5, 0x81, // Nonce data (example)
+        0x15, 0x8e, 0x01, 0x00, // More nonce data
+        0x00, 0x00, 0x00, 0x00  // Padding/alignment
+    };
+    size_t payload_size = sizeof(payload);
+
+    // reuse shm
+    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
+    memcpy(shm_input->kaddr, payload, payload_size);
+    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
+
+    struct optee_msg_arg *msg = shm_msg->kaddr;
+    memset(msg, 0, MSG_SHM_SIZE);
     msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
     msg->func = 0x00;
     msg->session = arg.session;
@@ -172,49 +171,34 @@ void kmtest_optee() {
 
     msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
     msg->params[0].u.value.a = 1;
-    msg->params[0].u.value.b = 0;
-    msg->params[0].u.value.c = 0;
 
     msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
     uint64_t pa_input = 0;
     isee_shm_get_pa(shm_input, 0, &pa_input);
     msg->params[1].u.tmem.buf_ptr = pa_input;
-    msg->params[1].u.tmem.size = sizeof(payload);
+    msg->params[1].u.tmem.size = payload_size;
     msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
 
     msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
     uint64_t pa_output = 0;
     isee_shm_get_pa(shm_output, 0, &pa_output);
     msg->params[2].u.tmem.buf_ptr = pa_output;
-    msg->params[2].u.tmem.size = 0x5000;
+    msg->params[2].u.tmem.size = FIXED_SHM_SIZE;
     msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
 
     msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
-    memset(&msg->params[3].u, 0, sizeof(msg->params[3].u));
 
     soter_do_call_with_arg(ctx, msg);
 
-    // Sign with RSA
-    // Begin (0x04)
-    struct tee_shm *shm_input_begin = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    struct tee_shm *shm_output_begin = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    struct tee_shm *shm_msg_begin = isee_shm_alloc(ctx, 0x1000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    if (!shm_input_begin || !shm_output_begin || !shm_msg_begin) {
-        printf("Failed to allocate begin shared memory\n");
-        goto cleanup_generate;
+    if (msg->ret != 0) {
+        printf("Generate key failed: 0x%08x\n", msg->ret);
+        return -1;
     }
+    return 0;
+}
 
-    uint64_t pa_input_begin = 0;
-    if (isee_shm_get_pa(shm_input_begin, 0, &pa_input_begin) != 0) {
-        printf("Failed to get physical address for shm_input_begin\n");
-        goto cleanup_begin;
-    }
-    uint64_t pa_output_begin = 0;
-    if (isee_shm_get_pa(shm_output_begin, 0, &pa_output_begin) != 0) {
-        printf("Failed to get physical address for shm_output_begin\n");
-        goto cleanup_begin;
-    }
-
+// Begin (0x04), extract handle
+int km_begin_op() {
     // 02 00 00 00 --> keymaster_purpose_t; Value 2 = KM_PURPOSE_SIGN
     // f3 05 00 00 --> Length of keyblob in bytes 0x000005f3 = 1523
     // after that: opaque keyblob
@@ -471,244 +455,224 @@ void kmtest_optee() {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
-    size_t begin_payload_size = sizeof(begin_payload); //1523 bytes
+    size_t payload_size = sizeof(begin_payload);
 
-    memcpy(shm_input_begin->kaddr, begin_payload, begin_payload_size);
+    // reuse shm
+    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
+    memcpy(shm_input->kaddr, begin_payload, payload_size);
+    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
 
-    struct optee_msg_arg *msg_begin = shm_msg_begin->kaddr;
-    msg_begin->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg_begin->func = 0x04;
-    msg_begin->session = arg.session;
-    msg_begin->cancel_id = arg.cancel_id;
-    msg_begin->num_params = 4;
+    struct optee_msg_arg *msg = shm_msg->kaddr;
+    memset(msg, 0, MSG_SHM_SIZE);
 
-    msg_begin->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
-    msg_begin->params[0].u.value.a = 1;
-    msg_begin->params[0].u.value.b = 0;
-    msg_begin->params[0].u.value.c = 0;
+    msg->cmd        = OPTEE_MSG_CMD_INVOKE_COMMAND;
+    msg->func       = 0x04;
+    msg->session    = arg.session;
+    msg->cancel_id  = arg.cancel_id;
+    msg->num_params = 4;
 
-    msg_begin->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
-    msg_begin->params[1].u.tmem.buf_ptr = pa_input_begin;
-    msg_begin->params[1].u.tmem.size = begin_payload_size;
-    msg_begin->params[1].u.tmem.shm_ref = (uint64_t)shm_input_begin;
+    msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
+    msg->params[0].u.value.a = 1;
+    msg->params[0].u.value.b = 0;
+    msg->params[0].u.value.c = 0;
 
-    msg_begin->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
-    msg_begin->params[2].u.tmem.buf_ptr = pa_output_begin;
-    msg_begin->params[2].u.tmem.size = 0x5000;
-    msg_begin->params[2].u.tmem.shm_ref = (uint64_t)shm_output_begin;
+    uint64_t pa_input = 0, pa_output = 0;
+    isee_shm_get_pa(shm_input,  0, &pa_input);
+    isee_shm_get_pa(shm_output, 0, &pa_output);
 
-    msg_begin->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
-    memset(&msg_begin->params[3].u, 0, sizeof(msg_begin->params[3].u));
+    msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
+    msg->params[1].u.tmem.buf_ptr = pa_input;
+    msg->params[1].u.tmem.size    = payload_size;
+    msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
+
+    msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
+    msg->params[2].u.tmem.buf_ptr = pa_output;
+    msg->params[2].u.tmem.size    = FIXED_SHM_SIZE;
+    msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
+
+    msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
 
     printf("Begin shm refs: input=%p, pa_input=%llx, output=%p, pa_output=%llx\n",
-           (void *)msg_begin->params[1].u.tmem.shm_ref, pa_input_begin,
-           (void *)msg_begin->params[2].u.tmem.shm_ref, pa_output_begin);
+           (void *)msg->params[1].u.tmem.shm_ref, pa_input,
+           (void *)msg->params[2].u.tmem.shm_ref, pa_output);
 
-    soter_do_call_with_arg(ctx, msg_begin);
+    soter_do_call_with_arg(ctx, msg);
 
-    printf("Begin response code: %u\n", msg_begin->ret);
-    uint8_t handle[8] = {0};
-    if (msg_begin->ret == 0) {
-        size_t out_size = msg_begin->params[2].u.tmem.size;
-        printf("Begin output size: %zu bytes\n", out_size);
-        hexdump(shm_output_begin->kaddr, out_size > 32 ? 32 : out_size);
-        if (out_size >= 12) {
-            memcpy(handle, (uint8_t *)shm_output_begin->kaddr + 4, 8);
-            printf("Operation handle: ");
-            hexdump(handle, 8);
-        } else {
-            printf("Begin output too small to contain handle\n");
-        }
+    printf("Begin response code: %u\n", msg->ret);
+    if (msg->ret != 0) {
+        printf("Begin failed: 0x%08x\n", msg->ret);
+        return -1;
+    }
+
+    size_t out_size = msg->params[2].u.tmem.size;
+    printf("Begin output size: %zu bytes\n", out_size);
+    hexdump(shm_output->kaddr, out_size > 32 ? 32 : out_size);
+
+    if (out_size >= 12) {
+        memcpy(&op_handle, (uint8_t *)shm_output->kaddr + 4, 8);
+        printf("REAL HANDLE: 0x%016llx\n", op_handle);
     } else {
-        printf("Begin failed with TEEC error: %u\n", msg_begin->ret);
+        printf("Begin output too small\n");
+        return -1;
     }
 
-    uint64_t real_handle;
-    memcpy(&real_handle, shm_output_begin->kaddr + 4, 8);
-    printf("REAL HANDLE: 0x%016llx\n", real_handle);
+    return 0;
+}
 
-    // Update (0x08)
-    struct tee_shm *shm_input_update = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    if (shm_input_update == NULL) {
-        printf("shm_input_update allocation failed!\n");
-        goto cleanup_generate;
-    }
-    struct tee_shm *shm_output_update = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    if (shm_output_update == NULL) {
-        printf("shm_output_update allocation failed!\n");
-        goto cleanup_update;
-    }
-    struct tee_shm *shm_msg_update = isee_shm_alloc(ctx, 0x1000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    if (shm_msg_update == NULL) {
-        printf("shm_msg_update allocation failed!\n");
-        goto cleanup_update;
-    }
-
-    uint64_t pa_input_update = 0, pa_output_update = 0;
-    isee_shm_get_pa(shm_input_update, 0, &pa_input_update);
-    isee_shm_get_pa(shm_output_update, 0, &pa_output_update);
-    printf("Update shm refs: input=%p, pa_input=%llx, output=%p, pa_output=%llx\n",
-           shm_input_update, pa_input_update, shm_output_update, pa_output_update);
-
-    if (pa_input_update == 0 || pa_output_update == 0) {
-        printf("pa_input_update or pa_output_update is 0, allocation or mapping failed!\n");
-        goto cleanup_update;
-    }
-
-    // Size: 8 (handle) + 21 (input: 4 + 17) + 12 (empty auth set) = 41 bytes
+// Update (0x08)
+int km_update_op() {
     const size_t CORRECT_SIZE = 41;
-    memset(shm_input_update->kaddr, 0, CORRECT_SIZE);
-
-    // Build buffer: handle + input + auth set
     uint8_t update_header[41] = {0};
-    memcpy(update_header, &real_handle, 8);  // Dynamic handle from begin
+    memcpy(update_header, &op_handle, 8);  // use extracted handle
 
-    // Input buffer
     uint32_t input_len = 17;
     memcpy(update_header + 8, &input_len, 4);
-    // Hello, Keymaster!
+    //Hello, Keymaster!
     const uint8_t input_data[] = {
         0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x2c, 0x20, 0x4b,
         0x65, 0x79, 0x6d, 0x61, 0x73, 0x74, 0x65, 0x72, 0x21
     };
     memcpy(update_header + 12, input_data, 17);
 
-    // Empty AuthorizationSet: indirect_size=0 (4), count=0 (4), elements_size=0 (4)
-    uint32_t auth_indirect_size = 0;
-    memcpy(update_header + 29, &auth_indirect_size, 4);
-    uint32_t auth_count = 0;
-    memcpy(update_header + 33, &auth_count, 4);
-    uint32_t auth_elements_size = 0;
-    memcpy(update_header + 37, &auth_elements_size, 4);
+    // empty auth set
+    uint32_t zero = 0;
+    memcpy(update_header + 29, &zero, 4);
+    memcpy(update_header + 33, &zero, 4);
+    memcpy(update_header + 37, &zero, 4);
 
-    memcpy(shm_input_update->kaddr, update_header, CORRECT_SIZE);
-    printf("Update input buffer:\n");
-    hexdump(shm_input_update->kaddr, CORRECT_SIZE);
+    // reuse shm
+    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
+    memcpy(shm_input->kaddr, update_header, CORRECT_SIZE);
+    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
 
-    struct optee_msg_arg *msg_update = shm_msg_update->kaddr;
-    msg_update->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg_update->func = 0x08;
-    msg_update->session = arg.session;
-    msg_update->num_params = 4;
+    // get pa
+    uint64_t pa_input = 0, pa_output = 0;
+    isee_shm_get_pa(shm_input,  0, &pa_input);
+    isee_shm_get_pa(shm_output, 0, &pa_output);
 
-    msg_update->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
-    msg_update->params[0].u.value.a = 1;
-    msg_update->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
-    msg_update->params[1].u.tmem.buf_ptr = pa_input_update;
-    msg_update->params[1].u.tmem.size = CORRECT_SIZE;  // 41 bytes
-    msg_update->params[1].u.tmem.shm_ref = (uint64_t)shm_input_update;
-    msg_update->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
-    msg_update->params[2].u.tmem.buf_ptr = pa_output_update;
-    msg_update->params[2].u.tmem.size = 0x5000;
-    msg_update->params[2].u.tmem.shm_ref = (uint64_t)shm_output_update;
-    msg_update->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
+    struct optee_msg_arg *msg = shm_msg->kaddr;
+    memset(msg, 0, MSG_SHM_SIZE);
+    msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
+    msg->func = 0x08;
+    KM_CMD = &msg->func;  // from template
+    msg->session = arg.session;
+    msg->num_params = 4;
+
+    // Value IN/OUT 
+    msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
+    msg->params[0].u.value.a = 1;
+    msg->params[0].u.value.b = 0;
+    msg->params[0].u.value.c = 0;
+
+    // Input buffer (41 bytes) 
+    msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
+    msg->params[1].u.tmem.buf_ptr = pa_input;
+    msg->params[1].u.tmem.size    = CORRECT_SIZE;
+    msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
+
+    // Output buffer (big enough) 
+    msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
+    msg->params[2].u.tmem.buf_ptr = pa_output;
+    msg->params[2].u.tmem.size    = FIXED_SHM_SIZE;
+    msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
+
+    msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
 
     printf("Update: Sending EXACTLY %zu bytes\n", CORRECT_SIZE);
-    soter_do_call_with_arg(ctx, msg_update);
+    soter_do_call_with_arg(ctx, msg);
 
-    // Fix response handling: Check both ret and params[2].size for output
-    printf("Update response: %08x\n", msg_update->ret);
-    if (msg_update->ret == 0) {
-        size_t out_size = msg_update->params[2].u.tmem.size;
-        printf("Update output size: %zu bytes\n", out_size);
-        hexdump(shm_output_update->kaddr, out_size > 64 ? 64 : out_size);
-    } else {
-        printf("Update failed with error: 0x%08x\n", msg_update->ret);
+    if (msg->ret != 0) {
+        printf("Update failed: 0x%08x\n", msg->ret);
+        return -1;
     }
 
-    // Finish (0x0C)
-    struct tee_shm *shm_input_finish = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    if (shm_input_finish == NULL) {
-        printf("shm_input_finish allocation failed!\n");
-        goto cleanup_finish;
-    }
-    struct tee_shm *shm_output_finish = isee_shm_alloc(ctx, 0x5000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    if (shm_output_finish == NULL) {
-        printf("shm_output_finish allocation failed!\n");
-        goto cleanup_finish;
-    }
-    struct tee_shm *shm_msg_finish = isee_shm_alloc(ctx, 0x1000, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
-    if (shm_msg_finish == NULL) {
-        printf("shm_msg_finish allocation failed!\n");
-        goto cleanup_finish;
-    }
+    size_t out_size = msg->params[2].u.tmem.size;
+    printf("Update output size: %zu bytes\n", out_size);
+    hexdump(shm_output->kaddr, out_size > 64 ? 64 : out_size);
+    return 0;
+}
 
-    uint64_t pa_input_finish = 0, pa_output_finish = 0;
-    isee_shm_get_pa(shm_input_finish, 0, &pa_input_finish);
-    isee_shm_get_pa(shm_output_finish, 0, &pa_output_finish);
-
-
-    // Size: 8 (handle) + 12 (empty input: 4 + 8) + 12 (empty auth set) = 32 bytes
+// Finish (0x0C)
+int km_finish_op() {
     const size_t FINISH_SIZE = 32;
-    memset(shm_input_finish->kaddr, 0, FINISH_SIZE);
-
-    // Build buffer: handle + empty input + empty auth set
     uint8_t finish_header[32] = {0};
-    memcpy(finish_header, &real_handle, 8);  // Dynamic handle from begin
+    memcpy(finish_header, &op_handle, 8);
 
-    // Empty input buffer (no additional data)
-    uint32_t finish_input_len = 0;  // Umbenannt
-    memcpy(finish_header + 8, &finish_input_len, 4);
-    uint64_t zero = 0;
-    memcpy(finish_header + 12, &zero, 8);  // 8-byte padding for empty input
+    uint32_t zero = 0;
+    memcpy(finish_header + 8,  &zero, 4);   // input_len = 0
+    uint64_t zero64 = 0;
+    memcpy(finish_header + 12, &zero64, 8);
+    memcpy(finish_header + 20, &zero, 4);
+    memcpy(finish_header + 24, &zero, 4);
+    memcpy(finish_header + 28, &zero, 4);
 
-    // Empty AuthorizationSet
-    uint32_t finish_auth_indirect_size = 0;  // Umbenannt
-    memcpy(finish_header + 20, &finish_auth_indirect_size, 4);
-    uint32_t finish_auth_count = 0;  // Umbenannt
-    memcpy(finish_header + 24, &finish_auth_count, 4);
-    uint32_t finish_auth_elements_size = 0;  // Umbenannt
-    memcpy(finish_header + 28, &finish_auth_elements_size, 4);
+    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
+    memcpy(shm_input->kaddr, finish_header, FINISH_SIZE);
+    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
 
-    memcpy(shm_input_finish->kaddr, finish_header, FINISH_SIZE);
-    printf("Finish input buffer:\n");
-    hexdump(shm_input_finish->kaddr, FINISH_SIZE);
+    // get pa
+    uint64_t pa_input = 0, pa_output = 0;
+    isee_shm_get_pa(shm_input,  0, &pa_input);
+    isee_shm_get_pa(shm_output, 0, &pa_output);
 
-    struct optee_msg_arg *msg_finish = shm_msg_finish->kaddr;
-    msg_finish->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg_finish->func = 0x0C;
-    msg_finish->session = arg.session;
-    msg_finish->num_params = 4;
+    struct optee_msg_arg *msg = shm_msg->kaddr;
+    memset(msg, 0, MSG_SHM_SIZE);
+    msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
+    msg->func = 0x0C;
+    msg->session = arg.session;
+    msg->num_params = 4;
 
-    msg_finish->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
-    msg_finish->params[0].u.value.a = 1;
-    msg_finish->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
-    msg_finish->params[1].u.tmem.buf_ptr = pa_input_finish;
-    msg_finish->params[1].u.tmem.size = FINISH_SIZE;  // 32 bytes
-    msg_finish->params[1].u.tmem.shm_ref = (uint64_t)shm_input_finish;
-    msg_finish->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
-    msg_finish->params[2].u.tmem.buf_ptr = pa_output_finish;
-    msg_finish->params[2].u.tmem.size = 0x5000;
-    msg_finish->params[2].u.tmem.shm_ref = (uint64_t)shm_output_finish;
-    msg_finish->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
+    msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
+    msg->params[0].u.value.a = 1;
+
+    msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
+    msg->params[1].u.tmem.buf_ptr = pa_input;
+    msg->params[1].u.tmem.size    = FINISH_SIZE;
+    msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
+
+    msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
+    msg->params[2].u.tmem.buf_ptr = pa_output;
+    msg->params[2].u.tmem.size    = FIXED_SHM_SIZE;
+    msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
+
+    msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
 
     printf("Finish: Sending EXACTLY %zu bytes\n", FINISH_SIZE);
-    soter_do_call_with_arg(ctx, msg_finish);
+    soter_do_call_with_arg(ctx, msg);
 
-    printf("Finish response: %08x\n", msg_finish->ret);
-    if (msg_finish->ret == 0) {
-        size_t out_size = msg_finish->params[2].u.tmem.size;
-        printf("Finish output size: %zu bytes\n", out_size);
-        hexdump(shm_output_finish->kaddr, out_size > 64 ? 64 : out_size);
-    } else {
-        printf("Finish failed with error: 0x%08x\n", msg_finish->ret);
+    if (msg->ret != 0) {
+        printf("Finish failed: 0x%08x\n", msg->ret);
+        return -1;
     }
 
-    cleanup_finish:
-        isee_shm_free(shm_input_finish);
-        isee_shm_free(shm_output_finish);
-        isee_shm_free(shm_msg_finish);
-    cleanup_update:
-        isee_shm_free(shm_input_update);
-        isee_shm_free(shm_output_update);
-        isee_shm_free(shm_msg_update);
-    cleanup_begin:
-        isee_shm_free(shm_input_begin);
-        isee_shm_free(shm_output_begin);
-        isee_shm_free(shm_msg_begin);
-    cleanup_generate:
-        isee_shm_free(shm_input);
-        isee_shm_free(shm_output);
-        isee_shm_free(shm_msg);
+    size_t out_size = msg->params[2].u.tmem.size;
+    printf("Finish output size: %zu bytes\n", out_size);
+    hexdump(shm_output->kaddr, out_size > 64 ? 64 : out_size);
+    return 0;
+}
 
+// Warmup: configure -> generate -> begin -> update -> finish
+void km_warmup() {
+    if (km_configure() != 0) return;
+    if (km_generate_key() != 0) return;
+    if (km_begin_op() != 0) return;
+    if (km_update_op() != 0) return;
+    if (km_finish_op() != 0) return;
+    printf("Warmup completed successfully\n");
+}
+
+void km_camp_1_startfuzz() {
+    
+    soter_do_call_with_arg(ctx, shm_msg->kaddr);  
+}
+
+int main() {
+    km_init_ctx();
+    km_init_shm();
+
+    km_warmup();
+
+    printf("Full flow OK!\n");
+    km_cleanup();
+    return 0;
 }
