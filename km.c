@@ -16,7 +16,7 @@ static void *ctx;
 static struct tee_ioctl_open_session_arg arg = {0};
 static struct tee_param params[4] = {{0}};
 static void *KM_CAMP1_INPUT;  
-static u32 *KM_CMD;         
+static u32 *KM_CAMP1_FUNC;  // Pointer to msg->func for fuzzer symbol/direct injection
 
 extern unsigned char begin_payload_bin[];
 extern unsigned int begin_payload_bin_len;
@@ -58,7 +58,7 @@ void km_init_shm() {
 
     // Initialize fuzzing input and command
     KM_CAMP1_INPUT = shm_input->kaddr;
-    KM_CMD = &(((struct optee_msg_arg *)shm_msg->kaddr)->func);
+    KM_CAMP1_FUNC = &(((struct optee_msg_arg *)shm_msg->kaddr)->func);
 }
 
 // cleanup 
@@ -209,10 +209,10 @@ int km_begin_op() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
     memset(msg, 0, MSG_SHM_SIZE);
 
-    msg->cmd        = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg->func       = 0x04;
-    msg->session    = arg.session;
-    msg->cancel_id  = arg.cancel_id;
+    msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
+    msg->func = 0x04;
+    msg->session = arg.session;
+    msg->cancel_id = arg.cancel_id;
     msg->num_params = 4;
 
     msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
@@ -226,12 +226,12 @@ int km_begin_op() {
 
     msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
     msg->params[1].u.tmem.buf_ptr = pa_input;
-    msg->params[1].u.tmem.size    = payload_size;
+    msg->params[1].u.tmem.size = payload_size;
     msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
 
     msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
     msg->params[2].u.tmem.buf_ptr = pa_output;
-    msg->params[2].u.tmem.size    = FIXED_SHM_SIZE;
+    msg->params[2].u.tmem.size = FIXED_SHM_SIZE;
     msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
 
     msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
@@ -263,7 +263,7 @@ int km_begin_op() {
     return 0;
 }
 
-// Update (0x08)
+// Update (0x08); use *KM_CAMP1_FUNC for dynamic
 int km_update_op() {
     const size_t CORRECT_SIZE = 41;
     uint8_t update_header[41] = {0};
@@ -297,8 +297,7 @@ int km_update_op() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
     memset(msg, 0, MSG_SHM_SIZE);
     msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg->func = 0x08;
-    KM_CMD = &msg->func;  // from template
+    *KM_CAMP1_FUNC = 0x08;  // Set via pointer (dynamic)
     msg->session = arg.session;
     msg->num_params = 4;
 
@@ -405,35 +404,16 @@ void km_warmup() {
     printf("Warmup completed successfully\n");
 }
 
-// wip
-int FuzzerTestOneInput(const uint8_t *data, size_t size)
-{
-    if (size < 5) return 0;   // need command (4) + 1 byte payload
-
-    // Fuzzer controls command
-    *KM_CMD = *(const uint32_t *)data;           // e.g. 0x04, 0x08, etc.
-
-    // fuzzer controls input payload
-    size_t payload_sz = size - 4;
-    if (payload_sz > FIXED_SHM_SIZE) payload_sz = FIXED_SHM_SIZE;
-    memcpy(KM_CAMP1_INPUT, data + 4, payload_sz);
-    
-    // SMC + endfuzz()
-    km_camp_1_startfuzz();  
-
-    return 0;
-}
-
 void km_camp_1_startfuzz() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
-    memset(msg, 0, MSG_SHM_SIZE);
+    memset(msg, 0, MSG_SHM_SIZE);  // Clear (fuzzer injects func/payload before resume)
 
-    msg->cmd         = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg->session     = arg.session;
-    msg->cancel_id   = arg.cancel_id;
-    msg->num_params  = 4;
+    msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
+    msg->session = arg.session;
+    msg->cancel_id = arg.cancel_id;
+    msg->num_params = 4;
 
-    msg->params[0].attr      = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
+    msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
     msg->params[0].u.value.a = 1;
     msg->params[0].u.value.b = 0;
     msg->params[0].u.value.c = 0;
@@ -442,21 +422,21 @@ void km_camp_1_startfuzz() {
     isee_shm_get_pa(shm_input,  0, &pa_input);
     isee_shm_get_pa(shm_output, 0, &pa_output);
 
-    msg->params[1].attr           = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
+    msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
     msg->params[1].u.tmem.buf_ptr = pa_input;
-    msg->params[1].u.tmem.size    = FIXED_SHM_SIZE;   // TA reads real size from payload
+    msg->params[1].u.tmem.size = FIXED_SHM_SIZE;   // TA reads real size from payload
     msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
 
-    msg->params[2].attr           = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
+    msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
     msg->params[2].u.tmem.buf_ptr = pa_output;
-    msg->params[2].u.tmem.size    = FIXED_SHM_SIZE;
+    msg->params[2].u.tmem.size = FIXED_SHM_SIZE;
     msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
 
     msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
 
-    // Fuzzer already set:
-    //   *KM_CMD       → msg->func
-    //   KM_CAMP1_INPUT → input buffer
+    // Fuzzer already set via pointers:
+    //   *KM_CAMP1_FUNC → msg->func (command ID)
+    //   KM_CAMP1_INPUT → input buffer (payload)
 
     // → SMC
     soter_do_call_with_arg(ctx, msg);
@@ -479,6 +459,12 @@ int test_km() {
     km_warmup();
 
     printf("Full flow OK!\n");
-    km_cleanup();
+
+    // Dummy fuzz entry for initial snapshot: safe command, zeroed input
+    *KM_CAMP1_FUNC = 0x48;  // set command via pointer
+    memset(KM_CAMP1_INPUT, 0, FIXED_SHM_SIZE);
+    km_camp_1_startfuzz();  // hits start breakpoint, proceeds to end
+
+    // No cleanup: keep SHM for fuzz loop
     return 0;
 }
