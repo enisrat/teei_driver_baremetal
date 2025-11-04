@@ -404,7 +404,7 @@ void km_warmup() {
     printf("Warmup completed successfully\n");
 }
 
-void km_camp_1_startfuzz() {
+void km_prepare_fuzz_msg() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
     memset(msg, 0, MSG_SHM_SIZE);  // Clear (fuzzer injects func/payload before resume)
 
@@ -433,10 +433,10 @@ void km_camp_1_startfuzz() {
     msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
 
     msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
+}
 
-    // Fuzzer already set via pointers:
-    //   *KM_CAMP1_FUNC → msg->func (command ID)
-    //   KM_CAMP1_INPUT → input buffer (payload)
+void km_camp_1_startfuzz() {
+    struct optee_msg_arg *msg = shm_msg->kaddr;
 
     // → SMC
     soter_do_call_with_arg(ctx, msg);
@@ -459,6 +459,8 @@ int test_km() {
     km_warmup();
 
     printf("Full flow OK!\n");
+
+    km_prepare_fuzz_msg();
 
     // Dummy fuzz entry for initial snapshot: safe command, zeroed input
     *KM_CAMP1_FUNC = 0x48;  // set command via pointer
