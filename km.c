@@ -79,53 +79,72 @@ void km_init_ctx() {
     soter_open_session(ctx, &arg, params);
 }
 
-// Configure command (0x48)
-int km_configure() {
-    uint8_t payload_config[] = {
-        0xc0, 0xd4, 0x01, 0x00,  // OS Version: 120000 (Android 12)
-        0xa2, 0x16, 0x03, 0x00   // Patch Level: 202402 (February 2024)
-    };
-    size_t payload_size = sizeof(payload_config);
-
-    // reuse shm; clear and copy data
-    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
-    memcpy(shm_input->kaddr, payload_config, payload_size);
-    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
-
+// Prepare msg structure once (for both warmup and fuzzing)
+void km_prepare_msg() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
-    memset(msg, 0, MSG_SHM_SIZE);
+    memset(msg, 0, MSG_SHM_SIZE);  // Clear once
+
     msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg->func = 0x48;
     msg->session = arg.session;
     msg->cancel_id = arg.cancel_id;
     msg->num_params = 4;
 
     msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
     msg->params[0].u.value.a = 1;
+    msg->params[0].u.value.b = 0;
+    msg->params[0].u.value.c = 0;
+
+    uint64_t pa_input = 0, pa_output = 0;
+    isee_shm_get_pa(shm_input, 0, &pa_input);
+    isee_shm_get_pa(shm_output, 0, &pa_output);
 
     msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
-    uint64_t pa_input = 0;
-    isee_shm_get_pa(shm_input, 0, &pa_input);
     msg->params[1].u.tmem.buf_ptr = pa_input;
-    msg->params[1].u.tmem.size = payload_size;
     msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
 
     msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
-    uint64_t pa_output = 0;
-    isee_shm_get_pa(shm_output, 0, &pa_output);
     msg->params[2].u.tmem.buf_ptr = pa_output;
     msg->params[2].u.tmem.size = FIXED_SHM_SIZE;
     msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
 
     msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
+}
+
+// Helper to send a command (minimal changes: func, payload, size)
+int km_send_command(u32 func, const void *payload, size_t payload_size) {
+    struct optee_msg_arg *msg = shm_msg->kaddr;
+
+    // Minimal updates
+    msg->func = func;
+    msg->params[1].u.tmem.size = payload_size;
+
+    // Prepare buffers
+    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
+    if (payload && payload_size > 0) {
+        memcpy(shm_input->kaddr, payload, payload_size);
+    }
+    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
 
     soter_do_call_with_arg(ctx, msg);
 
     if (msg->ret != 0) {
-        printf("Configure failed: 0x%08x\n", msg->ret);
+        printf("Command 0x%x failed: 0x%08x\n", func, msg->ret);
         return -1;
     }
+
+    size_t out_size = msg->params[2].u.tmem.size;
+    printf("Command 0x%x output size: %zu bytes\n", func, out_size);
+    hexdump(shm_output->kaddr, out_size > 64 ? 64 : out_size);
     return 0;
+}
+
+// Configure command (0x48)
+int km_configure() {
+    uint8_t payload_config[] = {
+        0xc0, 0xd4, 0x01, 0x00,  // OS Version: 120000 (Android 12)
+        0xa2, 0x16, 0x03, 0x00   // Patch Level: 202402 (February 2024)
+    };
+    return km_send_command(0x48, payload_config, sizeof(payload_config));
 }
 
 // Generate key (0x00)
@@ -150,120 +169,26 @@ int km_generate_key() {
         0x15, 0x8e, 0x01, 0x00, // More nonce data
         0x00, 0x00, 0x00, 0x00  // Padding/alignment
     };
-    size_t payload_size = sizeof(payload);
-
-    // reuse shm
-    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
-    memcpy(shm_input->kaddr, payload, payload_size);
-    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
-
-    struct optee_msg_arg *msg = shm_msg->kaddr;
-    memset(msg, 0, MSG_SHM_SIZE);
-    msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg->func = 0x00;
-    msg->session = arg.session;
-    msg->cancel_id = arg.cancel_id;
-    msg->num_params = 4;
-
-    msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
-    msg->params[0].u.value.a = 1;
-
-    msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
-    uint64_t pa_input = 0;
-    isee_shm_get_pa(shm_input, 0, &pa_input);
-    msg->params[1].u.tmem.buf_ptr = pa_input;
-    msg->params[1].u.tmem.size = payload_size;
-    msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
-
-    msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
-    uint64_t pa_output = 0;
-    isee_shm_get_pa(shm_output, 0, &pa_output);
-    msg->params[2].u.tmem.buf_ptr = pa_output;
-    msg->params[2].u.tmem.size = FIXED_SHM_SIZE;
-    msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
-
-    msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
-
-    soter_do_call_with_arg(ctx, msg);
-
-    if (msg->ret != 0) {
-        printf("Generate key failed: 0x%08x\n", msg->ret);
-        return -1;
-    }
-    return 0;
+    return km_send_command(0x00, payload, sizeof(payload));
 }
 
 // Begin (0x04), extract handle
 int km_begin_op() {
-    // 02 00 00 00 --> keymaster_purpose_t; Value 2 = KM_PURPOSE_SIGN
-    // f3 05 00 00 --> Length of keyblob in bytes 0x000005f3 = 1523
-    // after that: opaque keyblob
-    
-    size_t payload_size = begin_payload_len;
-
-    // reuse shm
-    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
-    memcpy(shm_input->kaddr, begin_payload, payload_size);
-    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
-
-    struct optee_msg_arg *msg = shm_msg->kaddr;
-    memset(msg, 0, MSG_SHM_SIZE);
-
-    msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg->func = 0x04;
-    msg->session = arg.session;
-    msg->cancel_id = arg.cancel_id;
-    msg->num_params = 4;
-
-    msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
-    msg->params[0].u.value.a = 1;
-    msg->params[0].u.value.b = 0;
-    msg->params[0].u.value.c = 0;
-
-    uint64_t pa_input = 0, pa_output = 0;
-    isee_shm_get_pa(shm_input,  0, &pa_input);
-    isee_shm_get_pa(shm_output, 0, &pa_output);
-
-    msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
-    msg->params[1].u.tmem.buf_ptr = pa_input;
-    msg->params[1].u.tmem.size = payload_size;
-    msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
-
-    msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
-    msg->params[2].u.tmem.buf_ptr = pa_output;
-    msg->params[2].u.tmem.size = FIXED_SHM_SIZE;
-    msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
-
-    msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
-
-    printf("Begin shm refs: input=%p, pa_input=%zx, output=%p, pa_output=%zx\n",
-           (void *)msg->params[1].u.tmem.shm_ref, pa_input,
-           (void *)msg->params[2].u.tmem.shm_ref, pa_output);
-
-    soter_do_call_with_arg(ctx, msg);
-
-    printf("Begin response code: %u\n", msg->ret);
-    if (msg->ret != 0) {
-        printf("Begin failed: 0x%08x\n", msg->ret);
-        return -1;
+    int ret = km_send_command(0x04, begin_payload, begin_payload_len);
+    if (ret == 0) {
+        size_t out_size = ((struct optee_msg_arg *)shm_msg->kaddr)->params[2].u.tmem.size;
+        if (out_size >= 12) {
+            memcpy(&op_handle, (uint8_t *)shm_output->kaddr + 4, 8);
+            printf("REAL HANDLE: 0x%016llx\n", op_handle);
+        } else {
+            printf("Begin output too small\n");
+            return -1;
+        }
     }
-
-    size_t out_size = msg->params[2].u.tmem.size;
-    printf("Begin output size: %zu bytes\n", out_size);
-    hexdump(shm_output->kaddr, out_size > 32 ? 32 : out_size);
-
-    if (out_size >= 12) {
-        memcpy(&op_handle, (uint8_t *)shm_output->kaddr + 4, 8);
-        printf("REAL HANDLE: 0x%016llx\n", op_handle);
-    } else {
-        printf("Begin output too small\n");
-        return -1;
-    }
-
-    return 0;
+    return ret;
 }
 
-// Update (0x08); use *KM_CAMP1_FUNC for dynamic
+// Update (0x08)
 int km_update_op() {
     const size_t CORRECT_SIZE = 41;
     uint8_t update_header[41] = {0};
@@ -284,55 +209,7 @@ int km_update_op() {
     memcpy(update_header + 33, &zero, 4);
     memcpy(update_header + 37, &zero, 4);
 
-    // reuse shm
-    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
-    memcpy(shm_input->kaddr, update_header, CORRECT_SIZE);
-    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
-
-    // get pa
-    uint64_t pa_input = 0, pa_output = 0;
-    isee_shm_get_pa(shm_input,  0, &pa_input);
-    isee_shm_get_pa(shm_output, 0, &pa_output);
-
-    struct optee_msg_arg *msg = shm_msg->kaddr;
-    memset(msg, 0, MSG_SHM_SIZE);
-    msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    *KM_CAMP1_FUNC = 0x08;  // Set via pointer (dynamic)
-    msg->session = arg.session;
-    msg->num_params = 4;
-
-    // Value IN/OUT 
-    msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
-    msg->params[0].u.value.a = 1;
-    msg->params[0].u.value.b = 0;
-    msg->params[0].u.value.c = 0;
-
-    // Input buffer (41 bytes) 
-    msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
-    msg->params[1].u.tmem.buf_ptr = pa_input;
-    msg->params[1].u.tmem.size    = CORRECT_SIZE;
-    msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
-
-    // Output buffer (big enough) 
-    msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
-    msg->params[2].u.tmem.buf_ptr = pa_output;
-    msg->params[2].u.tmem.size    = FIXED_SHM_SIZE;
-    msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
-
-    msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
-
-    printf("Update: Sending EXACTLY %zu bytes\n", CORRECT_SIZE);
-    soter_do_call_with_arg(ctx, msg);
-
-    if (msg->ret != 0) {
-        printf("Update failed: 0x%08x\n", msg->ret);
-        return -1;
-    }
-
-    size_t out_size = msg->params[2].u.tmem.size;
-    printf("Update output size: %zu bytes\n", out_size);
-    hexdump(shm_output->kaddr, out_size > 64 ? 64 : out_size);
-    return 0;
+    return km_send_command(0x08, update_header, CORRECT_SIZE);
 }
 
 // Finish (0x0C)
@@ -349,49 +226,7 @@ int km_finish_op() {
     memcpy(finish_header + 24, &zero, 4);
     memcpy(finish_header + 28, &zero, 4);
 
-    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
-    memcpy(shm_input->kaddr, finish_header, FINISH_SIZE);
-    memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
-
-    // get pa
-    uint64_t pa_input = 0, pa_output = 0;
-    isee_shm_get_pa(shm_input,  0, &pa_input);
-    isee_shm_get_pa(shm_output, 0, &pa_output);
-
-    struct optee_msg_arg *msg = shm_msg->kaddr;
-    memset(msg, 0, MSG_SHM_SIZE);
-    msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg->func = 0x0C;
-    msg->session = arg.session;
-    msg->num_params = 4;
-
-    msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
-    msg->params[0].u.value.a = 1;
-
-    msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
-    msg->params[1].u.tmem.buf_ptr = pa_input;
-    msg->params[1].u.tmem.size    = FINISH_SIZE;
-    msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
-
-    msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
-    msg->params[2].u.tmem.buf_ptr = pa_output;
-    msg->params[2].u.tmem.size    = FIXED_SHM_SIZE;
-    msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
-
-    msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
-
-    printf("Finish: Sending EXACTLY %zu bytes\n", FINISH_SIZE);
-    soter_do_call_with_arg(ctx, msg);
-
-    if (msg->ret != 0) {
-        printf("Finish failed: 0x%08x\n", msg->ret);
-        return -1;
-    }
-
-    size_t out_size = msg->params[2].u.tmem.size;
-    printf("Finish output size: %zu bytes\n", out_size);
-    hexdump(shm_output->kaddr, out_size > 64 ? 64 : out_size);
-    return 0;
+    return km_send_command(0x0C, finish_header, FINISH_SIZE);
 }
 
 // Warmup: configure -> generate -> begin -> update -> finish
@@ -404,39 +239,11 @@ void km_warmup() {
     printf("Warmup completed successfully\n");
 }
 
-void km_prepare_fuzz_msg() {
-    struct optee_msg_arg *msg = shm_msg->kaddr;
-    memset(msg, 0, MSG_SHM_SIZE);  // Clear (fuzzer injects func/payload before resume)
-
-    msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
-    msg->session = arg.session;
-    msg->cancel_id = arg.cancel_id;
-    msg->num_params = 4;
-
-    msg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INOUT;
-    msg->params[0].u.value.a = 1;
-    msg->params[0].u.value.b = 0;
-    msg->params[0].u.value.c = 0;
-
-    uint64_t pa_input = 0, pa_output = 0;
-    isee_shm_get_pa(shm_input,  0, &pa_input);
-    isee_shm_get_pa(shm_output, 0, &pa_output);
-
-    msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
-    msg->params[1].u.tmem.buf_ptr = pa_input;
-    msg->params[1].u.tmem.size = FIXED_SHM_SIZE;   // TA reads real size from payload
-    msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
-
-    msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
-    msg->params[2].u.tmem.buf_ptr = pa_output;
-    msg->params[2].u.tmem.size = FIXED_SHM_SIZE;
-    msg->params[2].u.tmem.shm_ref = (uint64_t)shm_output;
-
-    msg->params[3].attr = OPTEE_MSG_ATTR_TYPE_NONE;
-}
-
 void km_camp_1_startfuzz() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
+
+    // Fuzzer already set func and input; just adjust size if needed (TA reads from payload)
+    msg->params[1].u.tmem.size = FIXED_SHM_SIZE;
 
     // → SMC
     soter_do_call_with_arg(ctx, msg);
@@ -451,19 +258,17 @@ void km_camp_1_endfuzz() {
     printf("campaign-1 END :)\n");
 }
 
-
 int test_km() {
     km_init_ctx();
     km_init_shm();
+    km_prepare_msg();  // Init msg once for everything
 
     km_warmup();
 
     printf("Full flow OK!\n");
 
-    km_prepare_fuzz_msg();
-
-    // Dummy fuzz entry for initial snapshot: safe command, zeroed input
-    *KM_CAMP1_FUNC = 0x48;  // set command via pointer
+    // For dummy fuzz entry: safe command, zeroed input
+    *KM_CAMP1_FUNC = 0x48;
     memset(KM_CAMP1_INPUT, 0, FIXED_SHM_SIZE);
     km_camp_1_startfuzz();  // hits start breakpoint, proceeds to end
 
