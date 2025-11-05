@@ -118,6 +118,10 @@ int km_send_command(u32 func, const void *payload, size_t payload_size) {
     msg->func = func;
     msg->params[1].u.tmem.size = payload_size;
 
+    // Reset back-written fields
+    msg->ret = 0;
+    msg->params[2].u.tmem.size = FIXED_SHM_SIZE;
+
     // Prepare buffers
     memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
     if (payload && payload_size > 0) {
