@@ -17,6 +17,7 @@ static struct tee_ioctl_open_session_arg arg = {0};
 static struct tee_param params[4] = {{0}};
 static void *KM_CAMP1_INPUT;  
 static u32 *KM_CAMP1_FUNC;  // Pointer to msg->func for fuzzer symbol/direct injection
+static u64 *KM_CAMP1_SIZE; // Pointer to input size field (params[1].u.tmem.size)
 
 extern unsigned char begin_payload_bin[];
 extern unsigned int begin_payload_bin_len;
@@ -59,6 +60,7 @@ void km_init_shm() {
     // Initialize fuzzing input and command
     KM_CAMP1_INPUT = shm_input->kaddr;
     KM_CAMP1_FUNC = &(((struct optee_msg_arg *)shm_msg->kaddr)->func);
+    KM_CAMP1_SIZE = &(((struct optee_msg_arg *)shm_msg->kaddr)->params[1].u.tmem.size);
 }
 
 // cleanup 
@@ -247,7 +249,7 @@ void km_camp_1_startfuzz() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
 
     // Fuzzer already set func and input; just adjust size if needed (TA reads from payload)
-    msg->params[1].u.tmem.size = FIXED_SHM_SIZE;
+    // msg->params[1].u.tmem.size = FIXED_SHM_SIZE;
 
     // → SMC
     soter_do_call_with_arg(ctx, msg);
