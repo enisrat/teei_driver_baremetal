@@ -248,11 +248,32 @@ void km_warmup() {
 void km_camp_1_startfuzz() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
 
-    // Fuzzer already set func and input; just adjust size if needed (TA reads from payload)
-    // msg->params[1].u.tmem.size = FIXED_SHM_SIZE;
+    // Save values before reset (since reset zeros the fields)
+    u32 fuzz_func = *KM_CAMP1_FUNC;
+    u64 fuzz_size = *KM_CAMP1_SIZE;
+
+    // // Reset message to clean state
+    km_prepare_msg();
+
+    // // Zero output only (input is handled by loadi/fuzzer)
+    // memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
+
+    // Apply func and size
+    msg->func = fuzz_func;
+    msg->params[1].u.tmem.size = fuzz_size;
 
     // → SMC
     soter_do_call_with_arg(ctx, msg);
+
+    // Debug Dump
+    int ret = msg->ret;
+    if (ret == 0) {
+        size_t out_size = msg->params[2].u.tmem.size;
+        printf("Command 0x%x output size: %zu bytes\n", fuzz_func, out_size);
+        hexdump(shm_output->kaddr, out_size);
+    } else {
+        printf("Command failed with ret 0x%x\n", ret);
+    }
 
     printf("KM startfuzz done\n");
 
