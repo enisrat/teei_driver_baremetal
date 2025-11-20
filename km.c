@@ -248,28 +248,14 @@ void km_warmup() {
 void km_camp_1_startfuzz() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
 
-    // Save values before reset (since reset zeros the fields)
-    u32 fuzz_func = *KM_CAMP1_FUNC;
-    u64 fuzz_size = *KM_CAMP1_SIZE;
-
-    // // Reset message to clean state
-    km_prepare_msg();
-
-    // // Zero output only (input is handled by loadi/fuzzer)
-    // memset(shm_output->kaddr, 0, FIXED_SHM_SIZE);
-
-    // Apply func and size
-    msg->func = fuzz_func;
-    msg->params[1].u.tmem.size = fuzz_size;
-
-    // → SMC
+    // → SMC (func and params[1].u.tmem.size are already set by fuzzer/debugger)
     soter_do_call_with_arg(ctx, msg);
 
     // Debug Dump
     int ret = msg->ret;
     if (ret == 0) {
         size_t out_size = msg->params[2].u.tmem.size;
-        printf("Command 0x%x output size: %zu bytes\n", fuzz_func, out_size);
+        printf("Command 0x%x output size: %zu bytes\n", msg->func, out_size);
         hexdump(shm_output->kaddr, out_size);
     } else {
         printf("Command failed with ret 0x%x\n", ret);
@@ -294,9 +280,7 @@ int test_km() {
 
     printf("Full flow OK!\n");
 
-    // For dummy fuzz entry: safe command, zeroed input
-    *KM_CAMP1_FUNC = 0x48;
-    memset(KM_CAMP1_INPUT, 0, FIXED_SHM_SIZE);
+    km_prepare_msg();
     km_camp_1_startfuzz();  // hits start breakpoint, proceeds to end
 
     // No cleanup: keep SHM for fuzz loop
