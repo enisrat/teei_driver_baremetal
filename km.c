@@ -5,7 +5,7 @@
 #include <soter_smc.h>
 #include "tee_private.h"
 #include "payload.h"
-#include "hexdump.h"
+#include "printf.h"
 
 #define KM_COMMAND_MAGIC 'X'
 #define FIXED_SHM_SIZE 0x11800  // fixed size for input/output SHM 
@@ -85,6 +85,7 @@ void km_init_ctx() {
 void km_prepare_msg() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
     memset(msg, 0, MSG_SHM_SIZE);  // Clear once
+    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
 
     msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
     msg->session = arg.session;
@@ -102,6 +103,7 @@ void km_prepare_msg() {
 
     msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
     msg->params[1].u.tmem.buf_ptr = pa_input;
+    msg->params[1].u.tmem.size = FIXED_SHM_SIZE;
     msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
 
     msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;
@@ -256,7 +258,7 @@ void km_camp_1_startfuzz() {
     if (ret == 0) {
         size_t out_size = msg->params[2].u.tmem.size;
         printf("Command 0x%x output size: %zu bytes\n", msg->func, out_size);
-        hexdump(shm_output->kaddr, out_size);
+        hexdump(shm_output->kaddr, 128);
     } else {
         printf("Command failed with ret 0x%x\n", ret);
     }
@@ -281,7 +283,7 @@ int test_km() {
     printf("Full flow OK!\n");
 
     km_prepare_msg();
-    km_camp_1_startfuzz();  // hits start breakpoint, proceeds to end
+    km_camp_1_startfuzz(); // hits start breakpoint, proceeds to end
 
     // No cleanup: keep SHM for fuzz loop
     return 0;
