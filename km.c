@@ -5,7 +5,6 @@
 #include <soter_smc.h>
 #include "tee_private.h"
 #include "payload.h"
-#include "hexdump.h"
 #include "printf.h"
 
 #define KM_COMMAND_MAGIC 'X'
