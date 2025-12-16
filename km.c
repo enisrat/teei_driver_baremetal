@@ -6,6 +6,7 @@
 #include "tee_private.h"
 #include "payload.h"
 #include "hexdump.h"
+#include "printf.h"
 
 #define KM_COMMAND_MAGIC 'X'
 #define FIXED_SHM_SIZE 0x11800  // fixed size for input/output SHM 
@@ -89,6 +90,7 @@ void km_init_ctx() {
 void km_prepare_msg() {
     struct optee_msg_arg *msg = shm_msg->kaddr;
     memset(msg, 0, MSG_SHM_SIZE);  // Clear once
+    memset(shm_input->kaddr, 0, FIXED_SHM_SIZE);
 
     msg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
     msg->session = arg.session;
@@ -106,6 +108,7 @@ void km_prepare_msg() {
 
     msg->params[1].attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT;
     msg->params[1].u.tmem.buf_ptr = pa_input;
+    msg->params[1].u.tmem.size = FIXED_SHM_SIZE;
     msg->params[1].u.tmem.shm_ref = (uint64_t)shm_input;
 
     msg->params[2].attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT;

@@ -58,7 +58,7 @@ test_ta_c1.o: test_ta_c1.c
 
 
 km.o: km.c 
-	$(CROSS_COMPILE)gcc $(CFLAGS) -I$(srctree)/drivers/misc/mediatek/teei/400/common/include -I$(srctree)/drivers/misc/mediatek/teei/400/tee/soter $(LINUXINCLUDE) -c -o $@ $^
+	$(CROSS_COMPILE)gcc $(CFLAGS) -I../ -I$(srctree)/drivers/misc/mediatek/teei/400/common/include -I$(srctree)/drivers/misc/mediatek/teei/400/tee/soter $(LINUXINCLUDE) -c -o $@ $^
 
 vfs.o: vfs.c thh/ta/c09c9c5daa504b78b0e46eda61556c3a.h thh/ta/8b22aba81ef0ccbfd9f5f4b634127e15.h thh/ta/d91f322ad5a441d5955110eda3272fc0.h thh/ta/0102030405060708090a0b0c0d0e0f10.h thh/ta/c1882f2d885e4e13a8c8e2622461b2fa.h thh/ta/93feffccd8ca11e796c7c7a21acb4932.h thh/ta/rpmb.h
 	$(CROSS_COMPILE)gcc $(CFLAGS) $(LINUXINCLUDE) -c -o $@ vfs.c
